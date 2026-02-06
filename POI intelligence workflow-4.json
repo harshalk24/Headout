@@ -1,0 +1,587 @@
+{
+  "name": "POI intelligence workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "/generate-poi-bundles",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -272,
+        64
+      ],
+      "id": "eebb736b-842c-44a2-8b9f-9a8815da28e5",
+      "name": "Webhook",
+      "webhookId": "4b3c2034-638d-4ad5-ade2-5e84e1e54cc9"
+    },
+    {
+      "parameters": {
+        "url": "https://maps.googleapis.com/maps/api/place/textsearch/json",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "query",
+              "value": "={{ $node[\"Webhook\"].json.body.poi }} {{ $node[\"Webhook\"].json.body.city }}\n"
+            },
+            {
+              "name": "key",
+              "value": "AIzaSyDv6dCFkXdtHaDE-r6-Zw5cAb6QKCgMdJQ"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        144,
+        64
+      ],
+      "id": "0fbd484c-c0bc-4930-917b-539b0d403abf",
+      "name": "Google Places Node",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "url": "=https://maps.googleapis.com/maps/api/place/nearbysearch/json",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "location",
+              "value": "={{$json.results[0].geometry.location.lat + \",\" + $json.results[0].geometry.location.lng}}"
+            },
+            {
+              "name": "radius",
+              "value": "7000"
+            },
+            {
+              "name": "type",
+              "value": "tourist_attraction"
+            },
+            {
+              "name": "key",
+              "value": "AIzaSyDv6dCFkXdtHaDE-r6-Zw5cAb6QKCgMdJQ"
+            },
+            {
+              "name": "keyword",
+              "value": "attraction"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        368,
+        160
+      ],
+      "id": "b4075a87-c606-4518-a34f-7e3bbb656d6e",
+      "name": "Nearby experiences search"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Read nearby places safely\nconst results = Array.isArray($json.results) ? $json.results : [];\n\n// Ensure poi_insight exists\nitems[0].json.poi_insight = items[0].json.poi_insight || {};\nitems[0].json.poi_insight.supply = items[0].json.poi_insight.supply || {};\n\n// Process nearby experiences with bundling logic\nconst nearbyExperiences = results.map(place => {\n  let intent = \"Sightseeing\";\n\n  if (Array.isArray(place.types)) {\n    if (place.types.includes(\"museum\")) intent = \"Culture\";\n    else if (place.types.includes(\"amusement_park\")) intent = \"Entertainment\";\n    else if (place.types.includes(\"tourist_attraction\")) intent = \"Landmark\";\n    else if (place.types.includes(\"park\")) intent = \"Leisure\";\n  }\n\n  return {\n    name: place.name || \"Nearby Experience\",\n    category: place.types?.[0] || \"Attraction\",\n    rating: place.rating || null,\n    intent, // 👈 key for bundling\n    bundle_signals: {\n      intent_overlap: [\"Landmark\", \"Culture\"].includes(intent) ? \"High\" : \"Medium\",\n      time_compatibility: \"High\",        // heuristic (same-day friendly)\n      availability_risk: \"Medium\"        // placeholder, conservative\n    }\n  };\n});\n\n// Attach to poi_insight (additive)\nitems[0].json.poi_insight.supply.nearby_experiences = nearbyExperiences;\n\n// Derive bundle candidates (top 3, high overlap)\nitems[0].json.poi_insight.supply.bundle_candidates = nearbyExperiences\n  .filter(e => e.bundle_signals.intent_overlap === \"High\")\n  .slice(0, 3)\n  .map(e => ({\n    experience: e.name,\n    rationale: \"High intent overlap and same-day compatibility\",\n    confidence: \"High\"\n  }));\n\nreturn items;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        544,
+        160
+      ],
+      "id": "4caa1c06-3f96-46ba-95c8-e3e3b3b10b33",
+      "name": "Process nearby experiences"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Read results safely from Google Places response\nconst results = Array.isArray($json.results) ? $json.results : [];\n\n// Ensure poi_insight exists (from initializer node)\nitems[0].json.poi_insight = items[0].json.poi_insight || {};\n\n// If no place is found, return a safe fallback item\nif (results.length === 0) {\n  return [\n    {\n      json: {\n        place_id: null,\n        name: \"Main POI\",\n        rating: null,\n        reviews: null,\n        category: \"Attraction\",\n        intent: \"PRIMARY\",\n        vicinity: \"\",\n        lat: null,\n        lng: null,\n        is_primary: true,\n        error: \"No place found from Google Places\",\n\n        // 🔹 Growth context (additive, non-breaking)\n        poi_insight: {\n          context: {\n            poi_name: \"Unknown POI\",\n            poi_type: \"Attraction\",\n            launch_intent: \"new_poi_analysis\",\n            assumed_personas: [\n              \"First-time tourist\",\n              \"Planning-heavy traveler\"\n            ]\n          }\n        }\n      }\n    }\n  ];\n}\n\n// Safely extract first place\nconst place = results[0] || {};\n\n// 🔹 Add growth context (DO NOT affect existing fields)\nitems[0].json.poi_insight.context = {\n  poi_name: place.name || \"Main POI\",\n  poi_type: \"Iconic Landmark\",\n  launch_intent: \"new_poi_analysis\",\n  assumed_personas: [\n    \"First-time tourist\",\n    \"Planning-heavy traveler\",\n    \"Time-constrained visitor\"\n  ]\n};\n\n// ✅ KEEP ORIGINAL RETURN STRUCTURE (CRITICAL)\nreturn [\n  {\n    json: {\n      place_id: place.place_id || null,\n      name: place.name || \"Main POI\",\n      rating: place.rating || null,\n      reviews: place.user_ratings_total || null,\n      category:\n        Array.isArray(place.types) && place.types.length > 0\n          ? place.types[0]\n          : \"Attraction\",\n      intent: \"PRIMARY\",\n      vicinity: place.formatted_address || \"\",\n      lat:\n        place.geometry &&\n        place.geometry.location &&\n        place.geometry.location.lat\n          ? place.geometry.location.lat\n          : null,\n      lng:\n        place.geometry &&\n        place.geometry.location &&\n        place.geometry.location.lng\n          ? place.geometry.location.lng\n          : null,\n      is_primary: true,\n\n      // 🔹 Attach growth context safely\n      poi_insight: items[0].json.poi_insight\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        464,
+        -32
+      ],
+      "id": "9a4eb06f-f74f-4330-afd1-4f41be047167",
+      "name": "Prepare main POI"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        736,
+        64
+      ],
+      "id": "aa4a307b-a78d-4bec-83ff-db14c17450e4",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Separate main POI and nearby POIs\nconst mainItem = items.find(i => i.json.poi_source === \"MAIN_POI\");\nconst nearbyItems = items.filter(i => i.json.poi_source === \"NEARBY_POI\");\n\n// Safety fallback\nif (!mainItem) {\n  return items;\n}\n\n// Extract nearby POI summaries\nconst nearbySummaries = nearbyItems.map(i => ({\n  name: i.json.name || \"Nearby Experience\",\n  category: i.json.category || \"Attraction\",\n  rating: i.json.rating || null,\n  intent: i.json.intent || null\n}));\n\n// Attach nearby POIs cleanly to main item\nmainItem.json.nearby_pois = nearbySummaries;\n\n// Preserve poi_insight and add confidence signal\nmainItem.json.poi_insight.confidence = {\n  ...(mainItem.json.poi_insight.confidence || {}),\n  poi_universe_size: nearbySummaries.length,\n  signal_strength:\n    nearbySummaries.length > 5 ? \"High\" : \"Medium\"\n};\n\n// Return ONLY the main POI item (critical)\nreturn [\n  {\n    json: mainItem.json\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1136,
+        64
+      ],
+      "id": "739281f1-414e-4658-b593-8a1c02737607",
+      "name": "Flatten POI"
+    },
+    {
+      "parameters": {
+        "url": "https://maps.googleapis.com/maps/api/place/details/json",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "place_id",
+              "value": "={{$json[\"place_id\"]}}"
+            },
+            {
+              "name": "fields",
+              "value": "name,rating,user_ratings_total,opening_hours,website,reviews,types"
+            },
+            {
+              "name": "key",
+              "value": "AIzaSyDv6dCFkXdtHaDE-r6-Zw5cAb6QKCgMdJQ"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1344,
+        64
+      ],
+      "id": "0e19f577-ce94-4748-ac90-b6efe589ebd2",
+      "name": "Google Places Node1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Ensure structures exist\nitems[0].json.poi_insight = items[0].json.poi_insight || {};\nitems[0].json.poi_insight.demand = items[0].json.poi_insight.demand || {};\n\nconst rawReviews = Array.isArray(items[0].json.raw_reviews)\n  ? items[0].json.raw_reviews\n  : [];\n\n// Basic text cleaning\nconst cleanedReviews = rawReviews\n  .map(text =>\n    text\n      .toLowerCase()\n      .replace(/[^a-z0-9\\s]/g, \"\") // remove punctuation\n      .replace(/\\s+/g, \" \")        // normalize spaces\n      .trim()\n  )\n  .filter(text => text.length > 20); // remove very short/noise reviews\n\n// Attach cleaned corpus\nitems[0].json.cleaned_reviews = cleanedReviews;\n\n// Add demand hygiene metrics\nitems[0].json.poi_insight.demand.cleaned_review_count =\n  cleanedReviews.length;\n\nitems[0].json.poi_insight.demand.review_signal_quality =\n  cleanedReviews.length > 20 ? \"High\" : \"Medium\";\n\nreturn items;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        64
+      ],
+      "id": "1c09f398-ae02-40bb-aefa-d3afaf6abd80",
+      "name": "Clean Place Details"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Ensure poi_insight exists\n$json.poi_insight = $json.poi_insight || {};\n$json.poi_insight.pain_points = [];\n\n// Safely read cleaned reviews\nconst reviews = Array.isArray($json.cleaned_reviews)\n  ? $json.cleaned_reviews\n  : [];\n\n// Keyword-based signal detection\nconst painPointRules = [\n  {\n    issue: \"Queue anxiety\",\n    keywords: [\"queue\", \"line\", \"waiting\", \"waited\"],\n    stage: \"pre-purchase\"\n  },\n  {\n    issue: \"Entry confusion\",\n    keywords: [\"confusing\", \"confusion\", \"wrong entrance\", \"hard to find\"],\n    stage: \"pre-purchase\"\n  },\n  {\n    issue: \"Timing uncertainty\",\n    keywords: [\"time slot\", \"timing\", \"schedule\", \"delay\"],\n    stage: \"pre-purchase\"\n  },\n  {\n    issue: \"Overcrowding\",\n    keywords: [\"crowded\", \"packed\", \"too many people\"],\n    stage: \"on-site\"\n  }\n];\n\n// Count mentions\nconst issueCounts = {};\nreviews.forEach(text => {\n  painPointRules.forEach(rule => {\n    if (rule.keywords.some(k => text.includes(k))) {\n      issueCounts[rule.issue] = (issueCounts[rule.issue] || 0) + 1;\n    }\n  });\n});\n\n// Build structured pain points\nconst totalReviews = reviews.length;\n\n$json.poi_insight.pain_points = painPointRules\n  .map(rule => {\n    const count = issueCounts[rule.issue] || 0;\n    if (count === 0) return null;\n\n    const frequency = count / totalReviews;\n\n    return {\n      issue: rule.issue,\n      stage: rule.stage,\n      frequency: Number(frequency.toFixed(2)),\n      impact:\n        frequency > 0.3 ? \"High\" :\n        frequency > 0.15 ? \"Medium\" :\n        \"Low\",\n      source: \"Public reviews\",\n      confidence: totalReviews > 20 ? \"High\" : \"Medium\"\n    };\n  })\n  .filter(Boolean);\n\n// IMPORTANT: return current item\nreturn $json;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1968,
+        64
+      ],
+      "id": "2fcc18e3-37d0-4d4d-ab0b-139f474bcaa9",
+      "name": "Extract Review Signals"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Ensure structures exist\n$json.poi_insight = $json.poi_insight || {};\n$json.poi_insight.demand = $json.poi_insight.demand || {};\n$json.poi_insight.supply = $json.poi_insight.supply || {};\n\n// Read pain points safely\nconst painPoints = Array.isArray($json.poi_insight.pain_points)\n  ? $json.poi_insight.pain_points\n  : [];\n\n// Split demand vs supply\nconst demandBlockers = painPoints.filter(p => p.stage === \"pre-purchase\");\nconst supplyIssues = painPoints.filter(p => p.stage !== \"pre-purchase\");\n\n// Rank by impact\nconst impactRank = { High: 3, Medium: 2, Low: 1 };\n\ndemandBlockers.sort(\n  (a, b) => impactRank[b.impact] - impactRank[a.impact]\n);\n\nsupplyIssues.sort(\n  (a, b) => impactRank[b.impact] - impactRank[a.impact]\n);\n\n// Attach to poi_insight\n$json.poi_insight.demand.blockers = demandBlockers;\n$json.poi_insight.supply.issues = supplyIssues;\n\n// Optional summary for fast reasoning\n$json.poi_insight.demand.summary =\n  demandBlockers.length > 0\n    ? `Users hesitate primarily due to ${demandBlockers[0].issue}.`\n    : \"No major pre-purchase blockers detected.\";\n\nreturn $json;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2176,
+        64
+      ],
+      "id": "1987a944-6dd6-4a23-b6d5-d6ee6fc704db",
+      "name": "Compute Friction Score"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Ensure structures exist\n$json.poi_insight = $json.poi_insight || {};\n$json.poi_insight.decision_context = {};\n\n// Read demand & supply issues\nconst demandBlockers = Array.isArray($json.poi_insight.demand?.blockers)\n  ? $json.poi_insight.demand.blockers\n  : [];\n\nconst supplyIssues = Array.isArray($json.poi_insight.supply?.issues)\n  ? $json.poi_insight.supply.issues\n  : [];\n\n// Build demand-side implication\nconst topDemandIssue = demandBlockers[0]?.issue || null;\n\n$json.poi_insight.decision_context.demand_implication = topDemandIssue\n  ? `Primary conversion hesitation is driven by ${topDemandIssue}. Messaging or product design should directly address this.`\n  : \"No major pre-purchase conversion blockers detected.\";\n\n// Build supply-side implication\nconst topSupplyIssue = supplyIssues[0]?.issue || null;\n\n$json.poi_insight.decision_context.supply_implication = topSupplyIssue\n  ? `On-site experience risk exists around ${topSupplyIssue}. This may affect repeat usage and reviews.`\n  : \"No major on-site experience risks detected.\";\n\n// Add decision framing\n$json.poi_insight.decision_context.growth_levers = {\n  address_with_messaging: demandBlockers.map(d => d.issue),\n  address_with_product: supplyIssues.map(s => s.issue)\n};\n\nreturn $json;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2384,
+        64
+      ],
+      "id": "f525bf5c-1b25-4770-a110-82736edacb2e",
+      "name": "Aggregate Friction Summary"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{$json.poi_insight}}\n",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are a Growth Manager at Headout launching a new Point of Interest (POI).\n\nYou are given structured demand signals, supply constraints, nearby experiences,\nand user pain points.\n\nYour job is NOT to analyse.\nYour job is to DECIDE.\n\nYou must answer:\n1. What should we sell for this POI?\n2. How should we position it on Headout?\n3. What should we sell next (upsells, bundles, sequencing)?\n\nBe concise, decisive, and practical.\nAvoid generic advice.\nAssume this output is shown directly to a Growth Manager.\n"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        2592,
+        64
+      ],
+      "id": "442ebd5b-4162-4d47-a230-42f912b75344",
+      "name": "AI Agent1"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        2464,
+        272
+      ],
+      "id": "35147584-2b5c-4c2f-a4d6-d2c620fa604b",
+      "name": "OpenAI Chat Model",
+      "credentials": {
+        "openAiApi": {
+          "id": "AoWYykYo2nKDyVwr",
+          "name": "OpenAi account 95"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "={\n  \"type\": \"object\",\n  \"properties\": {\n    \"revenue_leakages\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"problem\": { \"type\": \"string\" },\n          \"impact_level\": { \"type\": \"string\" },\n          \"affected_pois\": { \"type\": \"integer\" }\n        },\n        \"required\": [\"problem\", \"impact_level\", \"affected_pois\"]\n      }\n    },\n    \"high_revenue_opportunity_pois\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"name\": { \"type\": \"string\" },\n          \"friction_score\": { \"type\": \"number\" },\n          \"monetization_angle\": { \"type\": \"string\" }\n        },\n        \"required\": [\"name\", \"friction_score\", \"monetization_angle\"]\n      }\n    },\n    \"revenue_actions\": {\n      \"type\": \"array\",\n      \"items\": { \"type\": \"string\" }\n    },\n    \"expected_revenue_impact\": {\n      \"type\": \"array\",\n      \"items\": { \"type\": \"string\" }\n    }\n  },\n  \"required\": [\n    \"revenue_leakages\",\n    \"high_revenue_opportunity_pois\",\n    \"revenue_actions\",\n    \"expected_revenue_impact\"\n  ]\n}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        2768,
+        272
+      ],
+      "id": "29ad5e2d-147c-4b66-a650-98867206f323",
+      "name": "Structured Output Parser1"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{$json}}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "=Content-Type",
+                "value": "=application/json"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        3248,
+        64
+      ],
+      "id": "d73c2187-51ef-4edc-a8f4-047c16b0dd69",
+      "name": "Respond to Webhook1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Defensive initialization\nitems[0].json.poi_insight = items[0].json.poi_insight || {};\n\n// 1️⃣ Attach AI decisions (Structured Output Parser result)\nitems[0].json.poi_insight.growth_decisions = items[0].json.output || {};\n\n// 2️⃣ Add growth metrics for GM tracking\nitems[0].json.poi_insight.growth_metrics = {\n  primary_metrics: [\n    {\n      metric: \"Conversion Rate\",\n      why: \"Directly impacted by pre-purchase blockers\"\n    }\n  ],\n  secondary_metrics: [\n    {\n      metric: \"AOV\",\n      why: \"Driven by bundling and upsells\"\n    },\n    {\n      metric: \"Bundle Attach Rate\",\n      why: \"Measures cross-sell effectiveness\"\n    }\n  ],\n  guardrails: [\n    \"Refund Rate\",\n    \"Post-purchase complaints\"\n  ]\n};\n\n// 3️⃣ Cleanup (optional but recommended)\ndelete items[0].json.cleaned_reviews;\ndelete items[0].json.raw_reviews;\ndelete items[0].json.output; // remove AI wrapper\n\n// 4️⃣ Return full item\nreturn items;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3024,
+        64
+      ],
+      "id": "63a7ed52-d586-4cb0-9df3-e26a50ae26f9",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "jsCode": "items[0].json.poi_insight = {\n  context: {},\n  demand: {},\n  supply: {},\n  pain_points: [],\n  growth_decisions: {},\n  growth_metrics: {},\n  confidence: {}\n};\n\nreturn items;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -64,
+        64
+      ],
+      "id": "f8822638-db4b-4270-a49c-1492f35835ad",
+      "name": "initialise POI"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Tag each item as MAIN or NEARBY without altering structure\nreturn items.map(item => {\n  const json = item.json || {};\n\n  return {\n    json: {\n      ...json,\n      poi_source: json.is_primary === true ? \"MAIN_POI\" : \"NEARBY_POI\"\n    }\n  };\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        944,
+        64
+      ],
+      "id": "b7f6c5cc-82fb-4944-8207-230368734fc7",
+      "name": "tag poi source"
+    },
+    {
+      "parameters": {
+        "jsCode": "const result = items[0].json.result || {};\nconst reviews = Array.isArray(result.reviews) ? result.reviews : [];\n\n// Ensure poi_insight exists\nitems[0].json.poi_insight = items[0].json.poi_insight || {};\nitems[0].json.poi_insight.demand = items[0].json.poi_insight.demand || {};\n\n// Extract plain text reviews only\nitems[0].json.raw_reviews = reviews\n  .map(r => r.text)\n  .filter(Boolean);\n\n// Preserve metadata for downstream demand analysis\nitems[0].json.poi_insight.demand.raw_review_count = reviews.length;\n\nreturn items;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1552,
+        64
+      ],
+      "id": "a4847b60-b81d-4a6b-8934-3a7095428111",
+      "name": "extract raw review text"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "initialise POI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Places Node": {
+      "main": [
+        [
+          {
+            "node": "Prepare main POI",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Nearby experiences search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nearby experiences search": {
+      "main": [
+        [
+          {
+            "node": "Process nearby experiences",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process nearby experiences": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Prepare main POI": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "tag poi source",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Flatten POI": {
+      "main": [
+        [
+          {
+            "node": "Google Places Node1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Places Node1": {
+      "main": [
+        [
+          {
+            "node": "extract raw review text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean Place Details": {
+      "main": [
+        [
+          {
+            "node": "Extract Review Signals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Review Signals": {
+      "main": [
+        [
+          {
+            "node": "Compute Friction Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Friction Score": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Friction Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Friction Summary": {
+      "main": [
+        [
+          {
+            "node": "AI Agent1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent1",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser1": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "AI Agent1",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent1": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "initialise POI": {
+      "main": [
+        [
+          {
+            "node": "Google Places Node",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "tag poi source": {
+      "main": [
+        [
+          {
+            "node": "Flatten POI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "extract raw review text": {
+      "main": [
+        [
+          {
+            "node": "Clean Place Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "ab5f814a-0af1-4462-8483-801d04886bd1",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "51e7fb91cb9df2ded2f41a67ea0e464294112316497bd29236498cd58e740c8f"
+  },
+  "id": "f_IjQF05ahI6hKcvyk5Ci",
+  "tags": []
+}
